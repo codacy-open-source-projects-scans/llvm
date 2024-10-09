@@ -614,7 +614,6 @@
 #  define SI_MAC_OS_DEPLOYMENT_MIN_13_00 0
 #endif
 #define SANITIZER_INTERCEPT_FREADLINK (SI_MAC && SI_MAC_OS_DEPLOYMENT_MIN_13_00)
-
 // This macro gives a way for downstream users to override the above
 // interceptor macros irrespective of the platform they are on. They have
 // to do two things:

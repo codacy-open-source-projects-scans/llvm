@@ -10362,7 +10362,6 @@ INTERCEPTOR(SSIZE_T, freadlink, int fd, char *buf, SIZE_T bufsiz) {
     COMMON_INTERCEPTOR_FD_ACQUIRE(ctx, fd);
   return res;
 }
-
 #  define INIT_FREADLINK COMMON_INTERCEPT_FUNCTION(freadlink)
 #else
 #  define INIT_FREADLINK
