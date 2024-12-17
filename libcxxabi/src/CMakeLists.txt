@@ -75,6 +75,12 @@ if (NOT APPLE) # On Apple platforms, we always use -nostdlib++ so we don't need 
   add_library_flags_if(LIBCXXABI_HAS_C_LIB c)
 endif()
 
+if (FUCHSIA)
+    # TODO: Use CMAKE_LINK_LIBRARY_USING_FEATURE once our minimum CMake is at least 3.24
+    # https://cmake.org/cmake/help/latest/variable/CMAKE_LINK_LIBRARY_USING_FEATURE.html 
+    add_link_flags("-Wl,--push-state,--as-needed,-lzircon,--pop-state")
+endif()
+
 if (NOT LIBCXXABI_USE_COMPILER_RT)
   add_library_flags_if(LIBCXXABI_HAS_GCC_LIB gcc)
 endif()
@@ -91,7 +97,7 @@ if (ANDROID AND ANDROID_PLATFORM_LEVEL LESS 21)
 endif()
 
 # Setup flags.
-if (C_SUPPORTS_NOSTDLIBXX_FLAG)
+if (CXX_SUPPORTS_NOSTDLIBXX_FLAG)
   add_link_flags_if_supported(-nostdlib++)
 else()
   add_link_flags_if_supported(-nodefaultlibs)
@@ -167,7 +173,7 @@ if (LIBCXXABI_USE_LLVM_UNWINDER)
   endif()
 endif()
 target_link_libraries(cxxabi_shared_objects PRIVATE cxx-headers ${LIBCXXABI_LIBRARIES})
-if (NOT C_SUPPORTS_NOSTDLIBXX_FLAG)
+if (NOT CXX_SUPPORTS_NOSTDLIBXX_FLAG)
   target_link_libraries(cxxabi_shared_objects PRIVATE ${LIBCXXABI_BUILTINS_LIBRARY})
 endif()
 target_link_libraries(cxxabi_shared_objects PUBLIC cxxabi-headers)
