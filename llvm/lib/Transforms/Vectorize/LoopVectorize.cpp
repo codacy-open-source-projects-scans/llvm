@@ -7550,13 +7550,12 @@ VPRecipeBuilder::tryToWidenMemory(Instruction *I, ArrayRef<VPValue *> Operands,
   }
   if (LoadInst *Load = dyn_cast<LoadInst>(I))
     return new VPWidenLoadRecipe(*Load, Ptr, Mask, Consecutive, Reverse,
-                                 Load->getAlign(), VPIRMetadata(*Load, LVer),
-                                 I->getDebugLoc());
+                                 VPIRMetadata(*Load, LVer), I->getDebugLoc());
 
   StoreInst *Store = cast<StoreInst>(I);
   return new VPWidenStoreRecipe(*Store, Ptr, Operands[0], Mask, Consecutive,
-                                Reverse, Store->getAlign(),
-                                VPIRMetadata(*Store, LVer), I->getDebugLoc());
+                                Reverse, VPIRMetadata(*Store, LVer),
+                                I->getDebugLoc());
 }
 
 /// Creates a VPWidenIntOrFpInductionRecpipe for \p Phi. If needed, it will also
@@ -7752,8 +7751,7 @@ VPWidenRecipe *VPRecipeBuilder::tryToWiden(Instruction *I,
     if (CM.isPredicatedInst(I)) {
       SmallVector<VPValue *> Ops(Operands);
       VPValue *Mask = getBlockInMask(Builder.getInsertBlock());
-      VPValue *One =
-          Plan.getOrAddLiveIn(ConstantInt::get(I->getType(), 1u, false));
+      VPValue *One = Plan.getConstantInt(I->getType(), 1u);
       auto *SafeRHS = Builder.createSelect(Mask, Ops[1], One, I->getDebugLoc());
       Ops[1] = SafeRHS;
       return new VPWidenRecipe(*I, Ops);
@@ -7806,11 +7804,10 @@ VPWidenRecipe *VPRecipeBuilder::tryToWiden(Instruction *I,
   }
   case Instruction::ExtractValue: {
     SmallVector<VPValue *> NewOps(Operands);
-    Type *I32Ty = IntegerType::getInt32Ty(I->getContext());
     auto *EVI = cast<ExtractValueInst>(I);
     assert(EVI->getNumIndices() == 1 && "Expected one extractvalue index");
     unsigned Idx = EVI->getIndices()[0];
-    NewOps.push_back(Plan.getOrAddLiveIn(ConstantInt::get(I32Ty, Idx, false)));
+    NewOps.push_back(Plan.getConstantInt(32, Idx));
     return new VPWidenRecipe(*I, NewOps);
   }
   };
@@ -7935,6 +7932,26 @@ void VPRecipeBuilder::collectScaledReductions(VFRange &Range) {
     if (ExtendIsOnlyUsedByPartialReductions(Chain.ExtendA) &&
         (!Chain.ExtendB || ExtendIsOnlyUsedByPartialReductions(Chain.ExtendB)))
       ScaledReductionMap.try_emplace(Chain.Reduction, Pair.second);
+  }
+
+  // Check that all partial reductions in a chain are only used by other
+  // partial reductions with the same scale factor. Otherwise we end up creating
+  // users of scaled reductions where the types of the other operands don't
+  // match.
+  for (const auto &[Chain, Scale] : PartialReductionChains) {
+    auto AllUsersPartialRdx = [ScaleVal = Scale, this](const User *U) {
+      auto *UI = cast<Instruction>(U);
+      if (isa<PHINode>(UI) && UI->getParent() == OrigLoop->getHeader()) {
+        return all_of(UI->users(), [ScaleVal, this](const User *U) {
+          auto *UI = cast<Instruction>(U);
+          return ScaledReductionMap.lookup_or(UI, 0) == ScaleVal;
+        });
+      }
+      return ScaledReductionMap.lookup_or(UI, 0) == ScaleVal ||
+             !OrigLoop->contains(UI->getParent());
+    };
+    if (!all_of(Chain.Reduction->users(), AllUsersPartialRdx))
+      ScaledReductionMap.erase(Chain.Reduction);
   }
 }
 
@@ -8119,11 +8136,8 @@ VPRecipeBase *VPRecipeBuilder::tryToCreateWidenRecipe(VPSingleDefRecipe *R,
   if (isa<LoadInst>(Instr) || isa<StoreInst>(Instr))
     return tryToWidenMemory(Instr, Operands, Range);
 
-  if (std::optional<unsigned> ScaleFactor = getScalingForReduction(Instr)) {
-    if (auto PartialRed =
-            tryToCreatePartialReduction(Instr, Operands, ScaleFactor.value()))
-      return PartialRed;
-  }
+  if (std::optional<unsigned> ScaleFactor = getScalingForReduction(Instr))
+    return tryToCreatePartialReduction(Instr, Operands, ScaleFactor.value());
 
   if (!shouldWiden(Instr, Range))
     return nullptr;
@@ -8157,9 +8171,9 @@ VPRecipeBuilder::tryToCreatePartialReduction(Instruction *Reduction,
       isa<VPPartialReductionRecipe>(BinOpRecipe))
     std::swap(BinOp, Accumulator);
 
-  if (ScaleFactor !=
-      vputils::getVFScaleFactor(Accumulator->getDefiningRecipe()))
-    return nullptr;
+  assert(ScaleFactor ==
+             vputils::getVFScaleFactor(Accumulator->getDefiningRecipe()) &&
+         "all accumulators in chain must have same scale factor");
 
   unsigned ReductionOpcode = Reduction->getOpcode();
   if (ReductionOpcode == Instruction::Sub) {
@@ -8179,8 +8193,7 @@ VPRecipeBuilder::tryToCreatePartialReduction(Instruction *Reduction,
            "Expected an ADD or SUB operation for predicated partial "
            "reductions (because the neutral element in the mask is zero)!");
     Cond = getBlockInMask(Builder.getInsertBlock());
-    VPValue *Zero =
-        Plan.getOrAddLiveIn(ConstantInt::get(Reduction->getType(), 0));
+    VPValue *Zero = Plan.getConstantInt(Reduction->getType(), 0);
     BinOp = Builder.createSelect(Cond, BinOp, Zero, Reduction->getDebugLoc());
   }
   return new VPPartialReductionRecipe(ReductionOpcode, Accumulator, BinOp, Cond,
@@ -8643,7 +8656,7 @@ void LoopVectorizationPlanner::adjustRecipesForReductions(
       } else if (PhiR->isInLoop() && Kind == RecurKind::AddChainWithSubs &&
                  CurrentLinkI->getOpcode() == Instruction::Sub) {
         Type *PhiTy = PhiR->getUnderlyingValue()->getType();
-        auto *Zero = Plan->getOrAddLiveIn(ConstantInt::get(PhiTy, 0));
+        auto *Zero = Plan->getConstantInt(PhiTy, 0);
         VPWidenRecipe *Sub = new VPWidenRecipe(
             Instruction::Sub, {Zero, CurrentLink->getOperand(1)}, {},
             VPIRMetadata(), CurrentLinkI->getDebugLoc());
@@ -8857,8 +8870,7 @@ void LoopVectorizationPlanner::adjustRecipesForReductions(
       ToDelete.push_back(Select);
 
       // Convert the reduction phi to operate on bools.
-      PhiR->setOperand(0, Plan->getOrAddLiveIn(ConstantInt::getFalse(
-                              OrigLoop->getHeader()->getContext())));
+      PhiR->setOperand(0, Plan->getFalse());
       continue;
     }
 
@@ -8880,9 +8892,7 @@ void LoopVectorizationPlanner::adjustRecipesForReductions(
       unsigned ScaleFactor =
           RecipeBuilder.getScalingForReduction(RdxDesc.getLoopExitInstr())
               .value_or(1);
-      Type *I32Ty = IntegerType::getInt32Ty(PhiTy->getContext());
-      auto *ScaleFactorVPV =
-          Plan->getOrAddLiveIn(ConstantInt::get(I32Ty, ScaleFactor));
+      auto *ScaleFactorVPV = Plan->getConstantInt(32, ScaleFactor);
       VPValue *StartV = PHBuilder.createNaryOp(
           VPInstruction::ReductionStartVector,
           {PhiR->getStartValue(), Iden, ScaleFactorVPV},
