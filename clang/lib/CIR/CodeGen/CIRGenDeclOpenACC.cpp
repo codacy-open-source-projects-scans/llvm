@@ -112,8 +112,7 @@ void CIRGenFunction::emitOpenACCDeclare(const OpenACCDeclareDecl &d) {
       builder, exprLoc, mlir::acc::DeclareTokenType::get(&cgm.getMLIRContext()),
       {});
 
-  emitOpenACCClauses(enterOp, OpenACCDirectiveKind::Declare, d.getBeginLoc(),
-                     d.clauses());
+  emitOpenACCClauses(enterOp, OpenACCDirectiveKind::Declare, d.clauses());
 
   ehStack.pushCleanup<OpenACCDeclareCleanup>(CleanupKind::NormalCleanup,
                                              enterOp);
@@ -231,20 +230,24 @@ namespace {
 class OpenACCGlobalDeclareClauseEmitter final
     : public OpenACCClauseVisitor<OpenACCGlobalDeclareClauseEmitter> {
   CIRGenModule &cgm;
-  void clauseNotImplemented(const OpenACCClause &c) {
-    cgm.errorNYI(c.getSourceRange(), "OpenACC Global Declare Clause",
-                 c.getClauseKind());
-  }
 
 public:
   OpenACCGlobalDeclareClauseEmitter(CIRGenModule &cgm) : cgm(cgm) {}
 
   void VisitClause(const OpenACCClause &clause) {
-    clauseNotImplemented(clause);
+    llvm_unreachable("Invalid OpenACC clause on global Declare");
   }
 
   void emitClauses(ArrayRef<const OpenACCClause *> clauses) {
     this->VisitClauseList(clauses);
+  }
+
+  void VisitCopyInClause(const OpenACCCopyInClause &clause) {
+    for (const Expr *var : clause.getVarList())
+      cgm.emitGlobalOpenACCDeclareDataOperands<mlir::acc::CopyinOp>(
+          var, mlir::acc::DataClause::acc_copyin, clause.getModifierList(),
+          /*structured=*/true,
+          /*implicit=*/false, /*requiresDtor=*/true);
   }
 
   void VisitCreateClause(const OpenACCCreateClause &clause) {
@@ -253,6 +256,23 @@ public:
           var, mlir::acc::DataClause::acc_create, clause.getModifierList(),
           /*structured=*/true,
           /*implicit=*/false, /*requiresDtor=*/true);
+  }
+
+  void VisitDeviceResidentClause(const OpenACCDeviceResidentClause &clause) {
+    for (const Expr *var : clause.getVarList())
+      cgm.emitGlobalOpenACCDeclareDataOperands<
+          mlir::acc::DeclareDeviceResidentOp>(
+          var, mlir::acc::DataClause::acc_declare_device_resident, {},
+          /*structured=*/true,
+          /*implicit=*/false, /*requiresDtor=*/true);
+  }
+
+  void VisitLinkClause(const OpenACCLinkClause &clause) {
+    for (const Expr *var : clause.getVarList())
+      cgm.emitGlobalOpenACCDeclareDataOperands<mlir::acc::DeclareLinkOp>(
+          var, mlir::acc::DataClause::acc_declare_link, {},
+          /*structured=*/true,
+          /*implicit=*/false, /*requiresDtor=*/false);
   }
 };
 } // namespace
