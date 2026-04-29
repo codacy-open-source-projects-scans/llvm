@@ -1,6 +1,8 @@
 // Checks that -fmodules-driver correctly handles the import of Standard library
 // modules.
 
+// REQUIRES: x86-registered-target
+
 // The standard library modules manifest (libc++.modules.json) is discovered
 // relative to the installed C++ standard library runtime libraries
 // We need to create them in order for Clang to find the manifest.
