@@ -343,11 +343,8 @@ unsigned LoongArchInstrInfo::getInstSizeInBytes(const MachineInstr &MI) const {
     const MachineFunction *MF = MI.getParent()->getParent();
     const Function &F = MF->getFunction();
     if (F.hasFnAttribute("patchable-function-entry")) {
-      unsigned Num;
-      if (F.getFnAttribute("patchable-function-entry")
-              .getValueAsString()
-              .getAsInteger(10, Num))
-        return 0;
+      unsigned Num =
+          F.getFnAttributeAsParsedInteger("patchable-function-entry");
       return Num * 4;
     }
     [[fallthrough]];
@@ -375,6 +372,121 @@ bool LoongArchInstrInfo::isAsCheapAsAMove(const MachineInstr &MI) const {
            (MI.getOperand(2).isImm() && MI.getOperand(2).getImm() == 0);
   }
   return MI.isAsCheapAsAMove();
+}
+
+static bool isJumpTableLoad(const MachineInstr &MI) {
+  return any_of(MI.memoperands(), [](const MachineMemOperand *MMO) {
+    const PseudoSourceValue *PSV = MMO->getPseudoValue();
+    return PSV && PSV->isJumpTable();
+  });
+}
+
+// Return the index of the jump table whose address
+// (or an entry loaded from it) is held in Reg, or -1.
+static int getJumpTableIndexFromReg(const MachineRegisterInfo &MRI,
+                                    Register Reg) {
+  if (!Reg.isVirtual())
+    return -1;
+  const MachineInstr *MI = MRI.getUniqueVRegDef(Reg);
+  if (!MI)
+    return -1;
+
+  int JTI;
+  switch (MI->getOpcode()) {
+  case LoongArch::ADDI_D:
+  case LoongArch::ADDI_W:
+  case LoongArch::PseudoLA_PCREL:
+    for (const MachineOperand &MO : MI->operands())
+      if (MO.isJTI())
+        return MO.getIndex();
+    return -1;
+  case LoongArch::LDX_D:
+  case LoongArch::LDX_W:
+    // Normally, NonFIBaseAddr is corresponding to register $rj.
+    JTI = getJumpTableIndexFromReg(MRI, MI->getOperand(1).getReg());
+    if (JTI >= 0)
+      return JTI;
+    JTI = getJumpTableIndexFromReg(MRI, MI->getOperand(2).getReg());
+    if (JTI >= 0)
+      return JTI;
+    break;
+  default:
+    return -1;
+  }
+
+  return -1;
+}
+
+// LA32 do not support register offset load instrunctions (LDX),
+// so add another layer to get jump table address.
+static int getJumpTableIndexFromLoadAddr(const MachineRegisterInfo &MRI,
+                                         Register Reg) {
+  if (!Reg.isVirtual())
+    return -1;
+  const MachineInstr *MI = MRI.getUniqueVRegDef(Reg);
+  if (!MI)
+    return -1;
+
+  int JTI;
+  switch (MI->getOpcode()) {
+  case LoongArch::ADD_W:
+    JTI = getJumpTableIndexFromReg(MRI, MI->getOperand(1).getReg());
+    if (JTI >= 0)
+      return JTI;
+    JTI = getJumpTableIndexFromReg(MRI, MI->getOperand(2).getReg());
+    if (JTI >= 0)
+      return JTI;
+    break;
+  case LoongArch::ALSL_W:
+    // For la32s, address could only stores in register $rk.
+    return getJumpTableIndexFromReg(MRI, MI->getOperand(2).getReg());
+  }
+
+  return -1;
+}
+
+// Recursively search for %jump-table.N starting from PseudoBRIND,
+// and return the index of &jump-table.N
+//
+// One common jump table:
+//
+//   %base = PseudoLA_PCREL %jump-table.N
+//   %off  = LDX_W %base, %index
+//   %tgt  = ADD_D %base, %off
+//   %PseudoBRIND %tgt, 0
+//
+int LoongArchInstrInfo::getJumpTableIndex(const MachineInstr &MI) const {
+  if (MI.getOpcode() != LoongArch::PseudoBRIND)
+    return -1;
+
+  Register Reg = MI.getOperand(0).getReg();
+  if (!Reg.isVirtual())
+    return -1;
+
+  const MachineRegisterInfo &MRI = MI.getMF()->getRegInfo();
+  MachineInstr *Def = MRI.getUniqueVRegDef(Reg);
+  if (!Def)
+    return -1;
+
+  int JTI;
+  switch (Def->getOpcode()) {
+  case LoongArch::LD_W:
+    if (!isJumpTableLoad(*Def))
+      return -1;
+
+    JTI = getJumpTableIndexFromLoadAddr(MRI, Def->getOperand(1).getReg());
+    if (JTI >= 0)
+      return JTI;
+    break;
+  case LoongArch::ADD_D:
+  case LoongArch::ADD_W:
+    JTI = getJumpTableIndexFromReg(MRI, Def->getOperand(1).getReg());
+    if (JTI >= 0)
+      return JTI;
+    return getJumpTableIndexFromReg(MRI, Def->getOperand(2).getReg());
+  }
+
+  return getJumpTableIndexFromReg(MRI, Reg);
 }
 
 MachineBasicBlock *

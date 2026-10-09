@@ -23,7 +23,7 @@ end function
 function test_func2()
 !DIR$ INLINEALWAYS wrong_func
 end function
-! CHCEK: func.func @_QPtest_func2() -> f32 {
+! CHECK: func.func @_QPtest_func2() -> f32 {
 
 integer function test_func3() result(res)
   res = 10
@@ -35,10 +35,10 @@ subroutine test()
 
   !DIR$ INLINEALWAYS
   call test_subroutine3
-! CHECK: fir.call @_QPtest_subroutine3() fastmath<contract> {inline_attr = #fir.inline_attrs<always_inline>} : () -> ()
+! CHECK: fir.call @_QPtest_subroutine3() fastmath<contract> <{inline_attr = #fir.inline_attrs<always_inline>}> : () -> ()
 
   result = 0
   !DIR$ INLINEALWAYS
   result = test_func3()
-! CHCEK: %[[.*]] = fir.call @_QPtest_func3() fastmath<contract> {inline_attr = #fir.inline_attrs<always_inline>} : () -> i32
+! CHECK: fir.call @_QPtest_func3() fastmath<contract> <{inline_attr = #fir.inline_attrs<always_inline>}> : () -> i32
 end subroutine
